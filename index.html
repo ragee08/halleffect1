@@ -1,62 +1,292 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Hall Effect Sensor Monitor</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hall Voltage Monitor (Web Serial)</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background-color: #f4f8fb;
-      color: #333;
-      text-align: center;
-      margin-top: 80px;
+    body{
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      margin: 0;
+      padding: 20px;
+      background: #f7f7f9;
+      color: #111;
     }
-    h1 {
-      color: #0066cc;
+    header{display:flex;align-items:center;gap:16px}
+    h1{margin:0;font-size:20px}
+    .controls{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+    button{
+      padding:8px 14px;border-radius:8px;border:1px solid #ccc;background:white;cursor:pointer;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.03);
     }
-    .card {
-      display: inline-block;
-      background-color: #fff;
-      padding: 20px 40px;
-      border-radius: 12px;
-      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-    }
-    .value {
-      font-size: 32px;
-      font-weight: bold;
-      color: #009900;
-    }
-    footer {
-      margin-top: 60px;
-      font-size: 13px;
-      color: #777;
-    }
+    button.primary{background:#e60000;color:white;border-color:#b30000}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .status{margin-left:12px;font-size:14px;color:#555}
+    .panel{margin-top:18px;display:grid;grid-template-columns:220px 1fr;gap:18px;align-items:start}
+    .card{background:white;padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.04)}
+    .value{font-size:36px;font-weight:700;color:#b30000;text-align:center}
+    .unit{font-size:14px;color:#666;text-align:center;margin-top:6px}
+    .log{width:100%;height:220px;overflow:auto;background:#0a0b0c;color:#cfe; padding:8px;border-radius:6px;font-family:monospace;font-size:13px}
+    canvas{width:100%;height:180px;display:block}
+    footer{margin-top:12px;color:#666;font-size:13px}
+    .small{font-size:13px;color:#666}
   </style>
 </head>
 <body>
+  <header>
+    <h1>Arduino Hall Voltage Monitor</h1>
+    <div class="status" id="connectionStatus">Disconnected</div>
+  </header>
 
-  <h1>🌡️ Hall Effect Voltage Monitor</h1>
+  <div class="controls">
+    <button id="btnConnect">Connect to Arduino</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <button id="btnClearLog">Clear Log</button>
+    <div class="small">Expected Arduino baud: <b>9600</b></div>
+  </div>
 
-  <div class="card">
-    <p>Current Hall Voltage:</p>
-    <p class="value" id="hallValue">-- V</p>
+  <div class="panel">
+    <div class="card">
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div class="value" id="voltageValue">--.-</div>
+        <div class="unit">Volts (V)</div>
+        <div style="display:flex;gap:8px;justify-content:center;margin-top:10px">
+          <div class="small">Last update: <span id="lastUpdate">—</span></div>
+        </div>
+        <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+        <div class="small">Parsed raw value: <span id="rawValue">—</span></div>
+        <div class="small">Connection info: <span id="portInfo">—</span></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:12px">
+        <canvas id="chartCanvas"></canvas>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong>Serial log</strong>
+          <div class="small">Incoming lines from Arduino</div>
+        </div>
+        <pre id="log" class="log">Press "Connect to Arduino" and allow the browser to access the serial port.</pre>
+      </div>
+    </div>
   </div>
 
   <footer>
-    Hall Effect Sensor | Arduino Web Monitor
+    <div class="small">Notes: Use Chrome/Edge. If page won't connect, make sure no other program (Arduino IDE / Serial Monitor) is using the port. If your Arduino prints raw numbers instead of "Hall Voltage: X V", the page will still try to parse the numeric value.</div>
   </footer>
 
-  <script>
-    // Auto-refresh every 2 seconds
-    setInterval(function() {
-      fetch("/hall") // <-- Arduino/ESP should respond with hall voltage at this endpoint
-        .then(response => response.text())
-        .then(data => {
-          document.getElementById("hallValue").innerText = data + " V";
-        })
-        .catch(error => console.log(error));
-    }, 2000);
-  </script>
+<script>
+/*
+  Web Serial monitor for Arduino Hall sensor.
+  - Connects to serial (baud 9600)
+  - Reads lines, tries to parse a float (like "Hall Voltage: 2.34 V")
+  - Displays numeric value and plots a small live chart
+*/
 
+const btnConnect = document.getElementById('btnConnect');
+const btnDisconnect = document.getElementById('btnDisconnect');
+const btnClearLog = document.getElementById('btnClearLog');
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('connectionStatus');
+const voltageEl = document.getElementById('voltageValue');
+const lastUpdateEl = document.getElementById('lastUpdate');
+const rawValueEl = document.getElementById('rawValue');
+const portInfoEl = document.getElementById('portInfo');
+
+let port = null;
+let reader = null;
+let inputDone = null;
+let keepReading = false;
+let decoder;
+let chart;
+let dataPoints = [];
+const MAX_POINTS = 120; // number of points on chart
+
+// Canvas simple line chart (no external libs)
+function initChart(){
+  const canvas = document.getElementById('chartCanvas');
+  const ctx = canvas.getContext('2d');
+  function draw(){
+    // resize for devicePixelRatio
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * dpr;
+    canvas.height = canvas.clientHeight * dpr;
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0,0,canvas.clientWidth, canvas.clientHeight);
+
+    // background grid
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,canvas.clientWidth, canvas.clientHeight);
+
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 1;
+    for(let i=0;i<4;i++){
+      let y = 10 + (canvas.clientHeight-20) * (i/3);
+      ctx.beginPath();
+      ctx.moveTo(0,y);
+      ctx.lineTo(canvas.clientWidth,y);
+      ctx.stroke();
+    }
+
+    if(dataPoints.length === 0) return;
+
+    // compute min/max with padding
+    const values = dataPoints.map(p=>p.v);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const pad = (max - min) * 0.1 || 0.5;
+    const yMin = min - pad;
+    const yMax = max + pad;
+
+    // draw line
+    ctx.beginPath();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#b30000';
+    const plotHeight = canvas.clientHeight - 24;
+    const plotWidth = canvas.clientWidth - 12;
+    dataPoints.forEach((pt, idx) => {
+      const x = 6 + (plotWidth) * (idx / (MAX_POINTS-1));
+      const y = 12 + plotHeight * (1 - (pt.v - yMin) / (yMax - yMin));
+      if(idx===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+
+    // draw min/max labels
+    ctx.fillStyle = '#444';
+    ctx.font = '12px system-ui';
+    ctx.fillText((yMax).toFixed(2) + ' V', 8, 12);
+    ctx.fillText((yMin).toFixed(2) + ' V', 8, canvas.clientHeight - 6);
+  }
+
+  chart = { draw };
+  chart.draw();
+}
+
+window.addEventListener('resize', ()=>{ if(chart) chart.draw(); });
+
+function appendLog(line){
+  const time = new Date().toLocaleTimeString();
+  logEl.textContent += `[${time}] ${line}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// try to parse a float from incoming line
+function parseVoltageFromLine(line){
+  // try to handle many formats:
+  // "Hall Voltage: 2.34 V", "2.34", "Voltage:2.34"
+  const m = line.match(/-?\d+(\.\d+)?/g);
+  if(!m) return null;
+  // choose the first float-looking substring
+  const num = parseFloat(m[0]);
+  if(Number.isFinite(num)) return num;
+  return null;
+}
+
+async function readLoop(){
+  decoder = new TextDecoderStream();
+  const inputDone = port.readable.pipeTo(decoder.writable);
+  const inputStream = decoder.readable;
+  reader = inputStream.getReader();
+  keepReading = true;
+  try {
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      // split into lines (some boards send multiple lines at once)
+      const lines = value.split(/\r?\n/);
+      for (let rawLine of lines) {
+        rawLine = rawLine.trim();
+        if (!rawLine) continue;
+        appendLog(rawLine);
+        const parsed = parseVoltageFromLine(rawLine);
+        rawValueEl.textContent = rawLine;
+        if (parsed !== null) {
+          const v = parsed;
+          voltageEl.textContent = v.toFixed(2);
+          lastUpdateEl.textContent = new Date().toLocaleTimeString();
+          // push to chart data
+          dataPoints.push({t: Date.now(), v});
+          if (dataPoints.length > MAX_POINTS) dataPoints.shift();
+          if (chart) chart.draw();
+        }
+      }
+    }
+  } catch (err) {
+    appendLog('Read error: ' + err);
+    console.error(err);
+  } finally {
+    reader.releaseLock && reader.releaseLock();
+  }
+}
+
+async function connectSerial(){
+  if (!("serial" in navigator)) {
+    alert('Web Serial API not available. Use latest Chrome or Edge on desktop.');
+    return;
+  }
+  try {
+    // request port from user
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+
+    statusEl.textContent = 'Connected';
+    portInfoEl.textContent = `Baud 9600 • ${port.getInfo ? JSON.stringify(port.getInfo()) : 'port'}`;
+    btnConnect.disabled = true;
+    btnDisconnect.disabled = false;
+
+    // small delay to allow Arduino reset (some boards reset on open)
+    await new Promise(r=>setTimeout(r, 300));
+
+    // start reading
+    readLoop();
+    appendLog('Serial port opened.');
+  } catch (err) {
+    appendLog('Connection canceled/failed: ' + err);
+    console.error(err);
+  }
+}
+
+async function disconnectSerial(){
+  keepReading = false;
+  try {
+    if (reader) {
+      await reader.cancel();
+      reader = null;
+    }
+    if (port && port.readable) {
+      await port.readable.cancel && port.readable.cancel();
+    }
+    if (port) {
+      await port.close();
+      appendLog('Port closed.');
+    }
+  } catch (err) {
+    appendLog('Error during disconnect: ' + err);
+    console.error(err);
+  } finally {
+    port = null;
+    statusEl.textContent = 'Disconnected';
+    btnConnect.disabled = false;
+    btnDisconnect.disabled = true;
+    portInfoEl.textContent = '—';
+  }
+}
+
+btnConnect.addEventListener('click', async ()=>{
+  await connectSerial();
+});
+
+btnDisconnect.addEventListener('click', async ()=>{
+  await disconnectSerial();
+});
+
+btnClearLog.addEventListener('click', ()=> { logEl.textContent = ''; });
+
+initChart();
+</script>
 </body>
 </html>
