@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Hall Effect Sensor Monitor</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f4f8fb;
+      color: #333;
+      text-align: center;
+      margin-top: 80px;
+    }
+    h1 {
+      color: #0066cc;
+    }
+    .card {
+      display: inline-block;
+      background-color: #fff;
+      padding: 20px 40px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+    }
+    .value {
+      font-size: 32px;
+      font-weight: bold;
+      color: #009900;
+    }
+    footer {
+      margin-top: 60px;
+      font-size: 13px;
+      color: #777;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>🌡️ Hall Effect Voltage Monitor</h1>
+
+  <div class="card">
+    <p>Current Hall Voltage:</p>
+    <p class="value" id="hallValue">-- V</p>
+  </div>
+
+  <footer>
+    Hall Effect Sensor | Arduino Web Monitor
+  </footer>
+
+  <script>
+    // Auto-refresh every 2 seconds
+    setInterval(function() {
+      fetch("/hall") // <-- Arduino/ESP should respond with hall voltage at this endpoint
+        .then(response => response.text())
+        .then(data => {
+          document.getElementById("hallValue").innerText = data + " V";
+        })
+        .catch(error => console.log(error));
+    }, 2000);
+  </script>
+
+</body>
+</html>
